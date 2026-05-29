@@ -56,6 +56,36 @@ wandb.init(
 )
 
 
+def class_comparison_table(rgb_correct, flow_correct, totals, classnames):
+    rows = []
+    chart_rows = []
+    for i, name in enumerate(classnames):
+        if totals[i] == 0:
+            continue
+        rgb_acc = rgb_correct[i] / totals[i]
+        flow_acc = flow_correct[i] / totals[i]
+        rows.append([name, rgb_acc, flow_acc, int(totals[i]), rgb_acc - flow_acc])
+        chart_rows.append([name, "RGB", rgb_acc])
+        chart_rows.append([name, "Flow", flow_acc])
+
+    table = wandb.Table(
+        columns=["class", "rgb_accuracy", "flow_accuracy", "count", "rgb_minus_flow"],
+        data=rows,
+    )
+    chart_table = wandb.Table(
+        columns=["class", "model", "accuracy"],
+        data=chart_rows,
+    )
+    chart = wandb.plot.bar(
+        chart_table,
+        "class",
+        "accuracy",
+        groupby="model",
+        title="RGB vs Flow accuracy per class",
+    )
+    return table, chart
+
+
 def evaluate():
     model.eval()
     temporal_model.eval()
@@ -65,6 +95,10 @@ def evaluate():
     correct_flow = 0
     total = 0
     num_batches = 0
+    num_classes = len(train_dataset.classnames)
+    rgb_correct_per_class = torch.zeros(num_classes)
+    flow_correct_per_class = torch.zeros(num_classes)
+    total_per_class = torch.zeros(num_classes)
 
     with torch.no_grad():
         for (x, flows), y in eval_loader:
@@ -86,18 +120,39 @@ def evaluate():
             consensus_flow = logits_flow.mean(dim=1)
             loss_flow = F.cross_entropy(consensus_flow, y)
 
+            pred_rgb = consensus.argmax(dim=1)
+            pred_flow = consensus_flow.argmax(dim=1)
+
             total_loss += loss.item()
             total_loss_flow += loss_flow.item()
-            correct += (consensus.argmax(dim=1) == y).sum().item()
-            correct_flow += (consensus_flow.argmax(dim=1) == y).sum().item()
+            correct += (pred_rgb == y).sum().item()
+            correct_flow += (pred_flow == y).sum().item()
             total += y.size(0)
             num_batches += 1
+
+            for c in range(num_classes):
+                mask = y == c
+                n = mask.sum().item()
+                if n == 0:
+                    continue
+                total_per_class[c] += n
+                rgb_correct_per_class[c] += (pred_rgb[mask] == c).sum().item()
+                flow_correct_per_class[c] += (pred_flow[mask] == c).sum().item()
+
+    class_table, class_chart = class_comparison_table(
+        rgb_correct_per_class,
+        flow_correct_per_class,
+        total_per_class,
+        train_dataset.classnames,
+    )
 
     return {
         "eval/loss": total_loss / num_batches,
         "eval/loss_flow": total_loss_flow / num_batches,
         "eval/accuracy": correct / total,
         "eval/accuracy_flow": correct_flow / total,
+        "eval/class_comparison": class_table,
+        "eval/class_comparison_chart": class_chart,
     }
 
 

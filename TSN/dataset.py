@@ -54,18 +54,18 @@ class UCF101(Dataset):
         if self.validation:
             flow_start_idx += num_flow_chunks / 2
         else:
-            idx_offset = np.random.randint(low=0, high=(num_flows/4) - 5, size=4)
+            idx_offset = np.random.randint(low=0, high=(num_flows/4) - 7, size=4)
             flow_start_idx += idx_offset
 
         flows_snipets = []
         for start in flow_start_idx:
             s = int(start) + 1
-            paths_x = [video_flow_dir + "/flow_x_" + f"{i:04d}.jpg" for i in range(int(s), int(s+5))]
-            paths_y = [video_flow_dir + "/flow_y_" + f"{i:04d}.jpg" for i in range(int(s), int(s+5))]
+            paths_x = [video_flow_dir + "/flow_x_" + f"{i:04d}.jpg" for i in range(int(s), int(s+7))]
+            paths_y = [video_flow_dir + "/flow_y_" + f"{i:04d}.jpg" for i in range(int(s), int(s+7))]
             fx = torch.stack([read_image(p) for p in paths_x]).squeeze(1)
             fy = torch.stack([read_image(p) for p in paths_y]).squeeze(1)
             snippet = torch.stack([fx, fy], dim=1)
-            snippet = snippet.reshape(2 * 5, *fx.shape[1:])  
+            snippet = snippet.reshape(2 * 7, *fx.shape[1:])  
             flows_snipets.append(snippet)
 
         flows = torch.stack(flows_snipets).float()
