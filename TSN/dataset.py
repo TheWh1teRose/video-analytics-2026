@@ -35,7 +35,8 @@ class UCF101(Dataset):
         if self.validation:
             frames_start_idx += num_frames_chunk / 2
         else:
-            idx_offset = np.random.randint(low=0, high=num_frames/4, size=4)
+            frame_high = max(int(num_frames / 4), 1)
+            idx_offset = np.random.randint(low=0, high=frame_high, size=4)
             frames_start_idx += idx_offset
             
         frames = vr.get_batch(frames_start_idx).asnumpy()
@@ -54,7 +55,8 @@ class UCF101(Dataset):
         if self.validation:
             flow_start_idx += num_flow_chunks / 2
         else:
-            idx_offset = np.random.randint(low=0, high=(num_flows/4) - 7, size=4)
+            flow_high = max(int(num_flows / 4) - 7, 1)
+            idx_offset = np.random.randint(low=0, high=flow_high, size=4)
             flow_start_idx += idx_offset
 
         flows_snipets = []
