@@ -8,6 +8,8 @@ import wandb
 
 NUM_EPOCHS = 10
 
+device = torch.device("cuda:0")
+
 train_dataset = UCF101("data/data/train.txt", "data/data/mini_UCF", "data/data/mini_UCF_flow")
 
 train_loader = DataLoader(
@@ -15,6 +17,7 @@ train_loader = DataLoader(
     batch_size=8,
     shuffle=True,
     num_workers=4,
+    pin_memory=True,
 )
 
 eval_dataset = UCF101(
@@ -29,10 +32,11 @@ eval_loader = DataLoader(
     batch_size=8,
     shuffle=False,
     num_workers=4,
+    pin_memory=True,
 )
 
-model = resnet(len(train_dataset.classnames))
-temporal_model = resnet_flow(len(train_dataset.classnames))
+model = resnet(len(train_dataset.classnames)).to(device)
+temporal_model = resnet_flow(len(train_dataset.classnames)).to(device)
 
 optimizer = optim.SGD(model.parameters(), lr=1e-3, momentum=0.9)
 scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=2000, gamma=0.1)
@@ -52,6 +56,7 @@ wandb.init(
         "lr": 1e-3,
         "lr_flow": 5e-3,
         "num_classes": len(train_dataset.classnames),
+        "device": str(device),
     },
 )
 
@@ -102,6 +107,10 @@ def evaluate():
 
     with torch.no_grad():
         for (x, flows), y in eval_loader:
+            x = x.to(device, non_blocking=True)
+            flows = flows.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+
             B, K = x.shape[:2]
             x = x.view(B * K, *x.shape[2:])
 
@@ -164,6 +173,10 @@ for epoch in range(NUM_EPOCHS):
     num_batches = 0
 
     for (x, flows), y in train_loader:
+        x = x.to(device, non_blocking=True)
+        flows = flows.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+
         B, K = x.shape[:2]
         x = x.view(B * K, *x.shape[2:])
 
