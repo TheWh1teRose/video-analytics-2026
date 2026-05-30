@@ -13,7 +13,7 @@ class resnet(nn.Module):
 class resnet_flow(resnet):
     def __init__(self, num_classes):
         super().__init__(num_classes)
-        L = 5
+        L = 7
 
         new_in_channels = 2 * L                                  
 
