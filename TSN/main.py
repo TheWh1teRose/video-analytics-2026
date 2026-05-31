@@ -8,10 +8,36 @@ import torch.nn.functional as F
 import torch.optim as optim
 import wandb
 
-NUM_EPOCHS = 10
-NUM_WORKERS = int(os.environ.get("NUM_WORKERS", "4"))
-BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "64"))
-EVAL_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "16"))
+NUM_EPOCHS = 50
+NUM_WORKERS = 4
+BATCH_SIZE = 16
+EVAL_BATCH_SIZE = 4
+
+
+def train_video_consensus(model, x, y, B, K, optimizer, scaler, use_amp):
+    """One video (K segments) per forward/backward to cap peak GPU memory."""
+    optimizer.zero_grad(set_to_none=True)
+    loss_sum = 0.0
+    for b in range(B):
+        x_b = x[b * K : (b + 1) * K]
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            logits_b = model(x_b)
+            loss_b = F.cross_entropy(logits_b.mean(dim=0, keepdim=True), y[b : b + 1])
+        scaler.scale(loss_b / B).backward()
+        loss_sum += loss_b.item()
+    scaler.step(optimizer)
+    scaler.update()
+    return loss_sum / B
+
+
+@torch.no_grad()
+def video_consensus_predict(model, x, B, K, use_amp):
+    logits = []
+    for b in range(B):
+        x_b = x[b * K : (b + 1) * K]
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            logits.append(model(x_b).mean(dim=0))
+    return torch.stack(logits)
 
 
 def make_loader(dataset, batch_size, shuffle):
@@ -30,32 +56,18 @@ def make_loader(dataset, batch_size, shuffle):
 
 def class_comparison_table(rgb_correct, flow_correct, totals, classnames):
     rows = []
-    chart_rows = []
     for i, name in enumerate(classnames):
         if totals[i] == 0:
             continue
         rgb_acc = rgb_correct[i] / totals[i]
         flow_acc = flow_correct[i] / totals[i]
         rows.append([name, rgb_acc, flow_acc, int(totals[i]), rgb_acc - flow_acc])
-        chart_rows.append([name, "RGB", rgb_acc])
-        chart_rows.append([name, "Flow", flow_acc])
 
     table = wandb.Table(
         columns=["class", "rgb_accuracy", "flow_accuracy", "count", "rgb_minus_flow"],
         data=rows,
     )
-    chart_table = wandb.Table(
-        columns=["class", "model", "accuracy"],
-        data=chart_rows,
-    )
-    chart = wandb.plot.bar(
-        chart_table,
-        "class",
-        "accuracy",
-        groupby="model",
-        title="RGB vs Flow accuracy per class",
-    )
-    return table, chart
+    return table
 
 
 def main():
@@ -122,7 +134,7 @@ def main():
         flow_correct_per_class = torch.zeros(num_classes)
         total_per_class = torch.zeros(num_classes)
 
-        with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
+        with torch.no_grad():
             for (x, flows), y in eval_loader:
                 x = x.to(device, non_blocking=True)
                 flows = flows.to(device, non_blocking=True)
@@ -134,16 +146,12 @@ def main():
                 B_flow, K_flow = flows.shape[:2]
                 flows = flows.view(B_flow * K_flow, *flows.shape[2:])
 
-                logits = model.forward(x)
-                logits = logits.view(B, K, -1)
+                consensus = video_consensus_predict(model, x, B, K, use_amp)
+                consensus_flow = video_consensus_predict(
+                    temporal_model, flows, B_flow, K_flow, use_amp
+                )
 
-                logits_flow = temporal_model.forward(flows)
-                logits_flow = logits_flow.view(B, K, -1)
-
-                consensus = logits.mean(dim=1)
                 loss = F.cross_entropy(consensus, y)
-
-                consensus_flow = logits_flow.mean(dim=1)
                 loss_flow = F.cross_entropy(consensus_flow, y)
 
                 pred_rgb = consensus.argmax(dim=1)
@@ -165,7 +173,7 @@ def main():
                     rgb_correct_per_class[c] += (pred_rgb[mask] == c).sum().item()
                     flow_correct_per_class[c] += (pred_flow[mask] == c).sum().item()
 
-        class_table, class_chart = class_comparison_table(
+        class_table = class_comparison_table(
             rgb_correct_per_class,
             flow_correct_per_class,
             total_per_class,
@@ -178,7 +186,6 @@ def main():
             "eval/accuracy": correct / total,
             "eval/accuracy_flow": correct_flow / total,
             "eval/class_comparison": class_table,
-            "eval/class_comparison_chart": class_chart,
         }
 
     for epoch in range(NUM_EPOCHS):
@@ -199,28 +206,28 @@ def main():
             B_flow, K_flow = flows.shape[:2]
             flows = flows.view(B_flow * K_flow, *flows.shape[2:])
 
-            optimizer.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda", enabled=use_amp):
-                logits = model.forward(x)
-                logits = logits.view(B, K, -1)
-                loss = F.cross_entropy(logits.mean(dim=1), y)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            loss = train_video_consensus(
+                model, x, y, B, K, optimizer, scaler, use_amp
+            )
+            del x
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
 
-            optimizer_flow.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda", enabled=use_amp):
-                logits_flow = temporal_model.forward(flows)
-                logits_flow = logits_flow.view(B, K, -1)
-                loss_flow = F.cross_entropy(logits_flow.mean(dim=1), y)
-            scaler.scale(loss_flow).backward()
-            scaler.step(optimizer_flow)
-            scaler.update()
+            loss_flow = train_video_consensus(
+                temporal_model,
+                flows,
+                y,
+                B_flow,
+                K_flow,
+                optimizer_flow,
+                scaler,
+                use_amp,
+            )
 
-            print(loss_flow.item())
+            print(loss_flow)
 
-            epoch_loss += loss.item()
-            epoch_loss_flow += loss_flow.item()
+            epoch_loss += loss
+            epoch_loss_flow += loss_flow
             num_batches += 1
 
         eval_metrics = evaluate()

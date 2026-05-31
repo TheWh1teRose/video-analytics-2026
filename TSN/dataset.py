@@ -55,9 +55,12 @@ class UCF101(Dataset):
         if self.validation:
             flow_start_idx += num_flow_chunks / 2
         else:
-            flow_high = max(int(num_flows / 4) - 7, 1)
+            flow_high = max(int(np.floor(num_flows / 4)) - 7, 1)
             idx_offset = np.random.randint(low=0, high=flow_high, size=4)
             flow_start_idx += idx_offset
+
+        max_start = max(int(num_flows) - 7, 0)
+        flow_start_idx = np.clip(flow_start_idx, 0, max_start)
 
         flows_snipets = []
         for start in flow_start_idx:
