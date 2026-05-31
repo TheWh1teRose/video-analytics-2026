@@ -10,6 +10,8 @@ import wandb
 
 NUM_EPOCHS = 10
 NUM_WORKERS = int(os.environ.get("NUM_WORKERS", "4"))
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "64"))
+EVAL_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "16"))
 
 
 def make_loader(dataset, batch_size, shuffle):
@@ -67,7 +69,7 @@ def main():
     train_dataset = UCF101(
         "data/data/train.txt", "data/data/mini_UCF", "data/data/mini_UCF_flow"
     )
-    train_loader = make_loader(train_dataset, batch_size=128, shuffle=True)
+    train_loader = make_loader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
     eval_dataset = UCF101(
         "data/data/validation.txt",
@@ -75,7 +77,7 @@ def main():
         "data/data/mini_UCF_flow",
         validation=True,
     )
-    eval_loader = make_loader(eval_dataset, batch_size=8, shuffle=False)
+    eval_loader = make_loader(eval_dataset, batch_size=EVAL_BATCH_SIZE, shuffle=False)
 
     model = resnet(len(train_dataset.classnames)).to(device)
     temporal_model = resnet_flow(len(train_dataset.classnames)).to(device)
@@ -90,11 +92,14 @@ def main():
         gamma=0.1,
     )
 
+    use_amp = device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
     wandb.init(
         project="TSN",
         config={
             "num_epochs": NUM_EPOCHS,
-            "batch_size": 128,
+            "batch_size": BATCH_SIZE,
             "lr": 1e-3,
             "lr_flow": 5e-3,
             "num_classes": len(train_dataset.classnames),
@@ -117,7 +122,7 @@ def main():
         flow_correct_per_class = torch.zeros(num_classes)
         total_per_class = torch.zeros(num_classes)
 
-        with torch.no_grad():
+        with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
             for (x, flows), y in eval_loader:
                 x = x.to(device, non_blocking=True)
                 flows = flows.to(device, non_blocking=True)
@@ -194,26 +199,23 @@ def main():
             B_flow, K_flow = flows.shape[:2]
             flows = flows.view(B_flow * K_flow, *flows.shape[2:])
 
-            optimizer.zero_grad()
-            optimizer_flow.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                logits = model.forward(x)
+                logits = logits.view(B, K, -1)
+                loss = F.cross_entropy(logits.mean(dim=1), y)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
-            logits = model.forward(x)
-            logits = logits.view(B, K, -1)
-
-            logits_flow = temporal_model.forward(flows)
-            logits_flow = logits_flow.view(B, K, -1)
-
-            consensus = logits.mean(dim=1)
-            loss = F.cross_entropy(consensus, y)
-
-            consensus_flow = logits_flow.mean(dim=1)
-            loss_flow = F.cross_entropy(consensus_flow, y)
-
-            loss.backward()
-            optimizer.step()
-
-            loss_flow.backward()
-            optimizer_flow.step()
+            optimizer_flow.zero_grad(set_to_none=True)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                logits_flow = temporal_model.forward(flows)
+                logits_flow = logits_flow.view(B, K, -1)
+                loss_flow = F.cross_entropy(logits_flow.mean(dim=1), y)
+            scaler.scale(loss_flow).backward()
+            scaler.step(optimizer_flow)
+            scaler.update()
 
             print(loss_flow.item())
 
